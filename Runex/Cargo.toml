@@ -1,0 +1,10 @@
+[package]
+name = "Runex"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+component = "0.1.1"
+local-ip-address = "0.6.3"
+rust-analyzer = "0.0.1"
+tokio = { version = "1.43.0", features = ["full"] }
