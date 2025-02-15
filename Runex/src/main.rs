@@ -17,7 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut rx = tx.subscribe();
     while let Ok(msg) = rx.recv().await {
-        println!("Received: {}", msg);
+        print!("Received: {}", msg);
     }
     Ok(())
 }
@@ -29,62 +29,58 @@ async fn listen_for_connections(
     let listener = TcpListener::bind("127.0.0.1:8080")
         .await
         .expect("Binding to port failed");
-    println!("Listening on port 127.0.0.1:8080");
+    println!("Listening on 127.0.0.1:8080");
     loop {
         if let Ok((stream, _)) = listener.accept().await {
             let stream = Arc::new(Mutex::new(stream));
             let peers_clone = Arc::clone(&peers);
-            let peer_tx = tx.clone();
+            let peer_tx_clone = tx.clone();
 
-            let mut peers_lock = peers_clone.lock().await;
+            let mut peers_clone_lock = peers_clone.lock().await;
             let stream_clone = Arc::clone(&stream);
-
-            peers_lock.push(stream_clone);
-            drop(peers_lock);
+            peers_clone_lock.push(stream_clone);
+            drop(peers_clone_lock);
+            //drop(stream_clone); Stream clone has been moved
+            
             task::spawn(async move {
-                handle_connection(stream, peer_tx,peers_clone).await;
+                handle_connection(stream, peer_tx_clone,peers_clone).await;
             });
         }
     }
 }
 
 async fn handle_connection(stream: Arc<Mutex<TcpStream>>, peer_tx: broadcast::Sender<String>,peers: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>) {
-    let reader = Arc::clone(&stream);
-    let writer = Arc::clone(&stream);
-
+    let peer_tx_clone = peer_tx.clone();
+    let reader_clone = Arc::clone(&stream);
     let read_task = tokio::spawn(async move {
         let mut buf = [0; 1024];
         loop {
-            let mut reader_lock = reader.lock().await;
+            let mut reader_lock = reader_clone.lock().await;
             let _ = reader_lock.read(&mut buf).await;
             drop(reader_lock);
             let data = String::from_utf8_lossy(&buf).to_string();
-            peer_tx.send(data).expect("Error");
-            buf.fill(0);
+            peer_tx_clone.send(data.trim().to_string()).expect("Error");
+           buf.fill(0);
         }
     });
 
-
     let write_task = tokio::spawn(async move {
-        loop {
-            broadcast_message_to_peers(&writer, &peers, "HELLO").await;
-        } 
+        loop { 
+            broadcast_message_to_peers(&peers, &stream, "Emergency broadcast").await;
+        }
     });
 
     let _ = tokio::join!(read_task, write_task);
 }
 
-async fn send_message(stream: &Arc<Mutex<TcpStream>>,msg: &str) {
-    let stream_lock = stream.lock();
-    stream_lock.await.write_all(msg.as_bytes()).await;
-}
 
-async fn broadcast_message_to_peers(stream: &Arc<Mutex<TcpStream>>, peers: &Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>, msg: &str) {
-    let peers_lock = peers.lock();
-    for peer in peers_lock.await.iter() {
-        let peer_lock = peer.lock().await;
-        if peer_lock.peer_addr().expect("Err") != stream.lock().await.peer_addr().expect("Err") {
-            send_message(&stream, msg);
-        }
+async fn broadcast_message_to_peers(peers: &Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,stream: &Arc<Mutex<TcpStream>>,msg: &str) {
+    let peers_lock = peers.lock().await;
+    for x in peers_lock.iter().filter(|p| Arc::ptr_eq(stream, p.to_owned()) ) {
+        let mut x_lock = x.lock().await;
+        x_lock.write_all(msg.as_bytes()).await.expect("err");
+        x_lock.flush().await.expect("msg");
+        drop(x_lock);
     }
+    drop(peers_lock);
 }
