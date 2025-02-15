@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::task;
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -48,5 +49,5 @@ async fn listen_for_connections(
 }
 
 async fn handle_connection(stream: Arc<TcpStream>, peer_tx: broadcast::Sender<String>) {
-    todo!()
+    let (reader, mut writer) = tokio::io::split(&*stream);
 }
