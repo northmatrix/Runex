@@ -10,16 +10,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::args().nth(1).unwrap().parse::<u16>().unwrap()
     );
     let (tx, _rx) = tokio::sync::broadcast::channel::<String>(100);
-    let (_ctx, crx) = tokio::sync::mpsc::channel::<String>(100);
     //Listen for incoming connections and handle them
     let tx_clone = tx.clone();
     let listener = task::spawn(async move {
         listen_for_connections(tx_clone, addr).await;
     });
     //Make outgoing connections and handle then
-    let connecter = task::spawn(async move { connect_to_peer(crx, tx).await });
     let _ = listener.await;
-    let _ = connecter.await;
     Ok(())
 }
 
@@ -69,14 +66,4 @@ async fn create_stream_handler(stream: TcpStream, tx: broadcast::Sender<String>)
             let _ = writer.flush().await;
         }
     });
-}
-
-async fn connect_to_peer(
-    mut crx: tokio::sync::mpsc::Receiver<String>,
-    tx: broadcast::Sender<String>,
-) {
-    while let Some(data) = crx.recv().await {
-        let stream = TcpStream::connect(data).await.unwrap();
-        create_stream_handler(stream, tx.clone()).await;
-    }
 }
