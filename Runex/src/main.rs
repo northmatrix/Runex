@@ -1,90 +1,82 @@
-use std::env::args;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio::task;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let peers: Arc<Mutex<Vec<OwnedWriteHalf>>> = Arc::new(Mutex::new(Vec::new()));
-    let peers_clone = Arc::clone(&peers);
-    listen_for_connections(peers_clone).await;
+    let addr = format!(
+        "127.0.0.1:{}",
+        std::env::args().nth(1).unwrap().parse::<u16>().unwrap()
+    );
+    let (tx, _rx) = tokio::sync::broadcast::channel::<String>(100);
+    let (_ctx, crx) = tokio::sync::mpsc::channel::<String>(100);
+    //Listen for incoming connections and handle them
+    let tx_clone = tx.clone();
+    let listener = task::spawn(async move {
+        listen_for_connections(tx_clone, addr).await;
+    });
+    //Make outgoing connections and handle then
+    let connecter = task::spawn(async move { connect_to_peer(crx, tx).await });
+    let _ = listener.await;
+    let _ = connecter.await;
     Ok(())
 }
 
-async fn listen_for_connections(peers: Arc<Mutex<Vec<OwnedWriteHalf>>>) {
-    let port = args().nth(1).unwrap();
-    let addr = format!("127.0.0.1:{}", port);
-    let listener = TcpListener::bind(addr)
-        .await
-        .expect("Binding to port failed");
-    println!("Listening on 127.0.0.1:8080.");
+async fn listen_for_connections(tx: broadcast::Sender<String>, addr: String) {
+    let listener = TcpListener::bind(&addr).await.unwrap();
+    println!("Listening on {}", &addr);
     loop {
         if let Ok((stream, _)) = listener.accept().await {
-            let (reader, writer) = stream.into_split();
-            let peers_clone = Arc::clone(&peers);
-            peers_clone.lock().await.push(writer);
-
-            // Spawn a new task to handle reading from this peer
-            task::spawn(async move {
-                handle_peer(reader, peers_clone).await;
-            });
+            create_stream_handler(stream, tx.clone()).await;
         }
     }
 }
 
-async fn handle_peer(mut reader: OwnedReadHalf, peers: Arc<Mutex<Vec<OwnedWriteHalf>>>) {
-    println!(
-        "Connected: {}, NoClientsRemaining: {}",
-        reader.peer_addr().unwrap(),
-        peers.lock().await.len()
-    );
-    let mut buf = [0; 1024];
-    let socket = reader.peer_addr().unwrap();
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => {
-                println!("Disconnected {}", socket);
-                let mut peers_lock = peers.lock().await;
-                peers_lock.retain(|peer| peer.peer_addr().is_ok());
+async fn create_stream_handler(stream: TcpStream, tx: broadcast::Sender<String>) {
+    let socket = stream.peer_addr().unwrap();
+    println!("Connection started: {}", socket);
+    let (mut reader, mut writer) = stream.into_split();
+    // Spawn a new task to handle reading from this peer
+    let tx_clone = tx.clone();
+    task::spawn(async move {
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = match reader.read(&mut buf).await {
+                Ok(0) => {
+                    println!("Connection closed: {}", socket);
+                    break;
+                }
+                Ok(n) => n,
+                Err(e) => {
+                    println!("Failed to read from stream {:?}", e);
+                    break;
+                }
+            };
+            let recieved = String::from_utf8_lossy(&buf[..n]).trim().to_string();
+            if let Err(e) = tx_clone.send(recieved.to_string()) {
+                println!("Failed to send message to the channel: {:?}", e);
                 break;
             }
-            Ok(n) => {
-                let data = String::from_utf8_lossy(&buf[..n]).trim().to_string();
-                if data.starts_with("connect") {
-                    if let Some(address) = data.strip_prefix("connect ") {
-                        match TcpStream::connect(address).await {
-                            Ok(stream) => {
-                                let (reader, writer) = stream.into_split();
-                                let mut peers_lock = peers.lock().await;
-                                peers_lock.push(writer);
-                                drop(peers_lock);
-                                let peers_clone = Arc::clone(&peers);
-                                task::spawn(handle_peer(reader, peers_clone));
-                            }
-                            Err(e) => {
-                                eprintln!("Failed to connect to {}: {}", address, e);
-                            }
-                        }
-                    }
-                    // so suppose this is an ip then how can i connect to it by adding it to peers
-                    // list and setting up a handle peer thread for  it
-                }
-                broadcast_message_to_peers(peers.clone(), &data).await;
-            }
-            Err(_) => break,
+            println!("Recieved: {}", recieved);
         }
-        buf.fill(0);
-    }
+    });
+    // Spawn a new task to handle writing to th!is peer
+    let mut rx = tx.subscribe();
+    task::spawn(async move {
+        while let Ok(recieved) = rx.recv().await {
+            let _ = writer.write_all(recieved.as_bytes()).await;
+            let _ = writer.flush().await;
+        }
+    });
 }
 
-async fn broadcast_message_to_peers(peers: Arc<Mutex<Vec<OwnedWriteHalf>>>, msg: &str) {
-    println!("Broadcasting message \"{}\" to all.", msg);
-    let mut peer_lock = peers.lock().await;
-    for p in peer_lock.iter_mut() {
-        let _ = p.write_all(msg.as_bytes()).await;
-        let _ = p.flush().await;
+async fn connect_to_peer(
+    mut crx: tokio::sync::mpsc::Receiver<String>,
+    tx: broadcast::Sender<String>,
+) {
+    while let Some(data) = crx.recv().await {
+        let stream = TcpStream::connect(data).await.unwrap();
+        create_stream_handler(stream, tx.clone()).await;
     }
 }
