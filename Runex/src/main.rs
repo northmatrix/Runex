@@ -49,6 +49,7 @@ async fn create_stream_handler(stream: TcpStream, tx: broadcast::Sender<Message>
             let n = match reader.read(&mut buf).await {
                 Ok(0) => {
                     println!("Connection closed: {}", socket);
+
                     break;
                 }
                 Ok(n) => n,
